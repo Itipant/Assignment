@@ -1,1 +1,97 @@
-abcd    
+VOTE APP DEMO
+
+1.	go to root (cd /root/) and install git.
+[root@ip-172-31-5-224 ~]# yum install git -y
+
+2.	git clone https://github.com/ashishrpandey/example-voting-app
+
+root@ip-172-31-5-224 ~]# git clone  https://github.com/ashishrpandey/example-voting-app
+Cloning into 'example-voting-app'...
+remote: Enumerating objects: 494, done
+Resolving deltas: 100% (179/179), done.
+ 
+
+Voting pod (vi app pushes the voting information to redis)
+ 
+Worker pod (the program pulls data from redis, connects to the Posgres sql, creates table and pushes the value into that table):
+ 
+Result pod (result app pulls the voting data from db and display the result.)
+ 
+3.	go to /root/example-voting-app/k8s-specifications (all the PODS are listed here)
+[root@ip-172-31-5-224 k8s-specifications]# ls
+db-deployment.yaml     redis-service.yaml      vote-deployment.yaml
+db-service.yaml        result-deployment.yaml  vote-service.yaml
+redis-deployment.yaml  result-service.yaml     worker-deployment.yaml
+ 
+4. kubectl apply -f .
+[root@ip-172-31-5-224 k8s-specifications]# kubectl apply -f .
+ 
+5. For voting and result pods, observed that NodePort is assigned:
+kubectl get all
+Result and vote service are having NodePort as these need to access externally through public IP.
+ 
+
+6. Taken the publicIP (instance IP) : NodePort ► opened 2 browsers , one for VOTING and one for Results.
+7. Voting is done and saw the results parallel in results page:
+   
+   
+8. Now deleted the Pods one by one (first voting Pod, then worker pod, then db pod)
+Observation:
+1.	Deleting the vote pod:
+
+[root@ip-172-31-5-224 k8s-specifications]# kubectl delete pod vote-94849dc97-qrv96
+
+ 
+
+After deleting the vote pod (94849dc97-qrv96), application is still running fine as replica set created the new vote pod (94849dc97-pb5vm).
+ 
+   
+[root@ip-172-31-5-224 k8s-specifications]# kubectl get deploy
+ 
+We can scale the replicas so that our application is not impacted.
+[root@ip-172-31-5-224 k8s-specifications]# kubectl scale deploy vote --replicas=3
+deployment.apps/vote scaled
+[root@ip-172-31-5-224 k8s-specifications]#
+
+ 
+
+  
+
+2.	Deleting the worker pod:
+[root@ip-172-31-5-224 k8s-specifications]# kubectl delete pod worker-dd46d7584-j8crk
+ 
+ 
+After deleting the worker pod (dd46d7584-j8crk), application is still running fine as replica set created the new worker pod (dd46d7584-5s5gw).
+When worker pod comes up, it needs to connect to both redis & db. After connected to redis & db, it started running as usual as worker pod does not store any data, it just pushes the data directly on to db.
+There may be the delay of microsecond for pushing the data which can be avoided by scaling the worker pod.
+3.	Deleting the db pod:
+[root@ip-172-31-5-224 k8s-specifications]# kubectl delete pod db-b54cd94f4-g7ncs
+1st observation:
+After deleting the db pod, result app stopped working. As even changing the vote, the result app is not changing the result. (The new db pod is running and worker pod is also pushing the data onto db but the result app is not working.)
+Root Cause: observed logs of the result app-
+[root@ip-172-31-5-224 k8s-specifications]# kubectl logs result-5d57b59f4b-cnc5w
+Error performing query: Error: This socket has been ended by the other party.
+
+The log shown the error “This socket has been ended by the other party”. 
+(As result app is synchronously connected to database (db pod) using socket to establish the connection. When db pod was deleted the new db pod is created but the socket connection is still trying to connect to old db and getting the error as shown in log because the socket connection is not changed yet and it is still connecting to old db and expecting to get the result but when not getting any response the result app is giving error that the other party means old db is not responding. But in actual old db is deleted.
+2nd observation:
+The container in the worker pod has been restarted.
+[root@ip-172-31-5-224 k8s-specifications]# kubectl get po
+NAME                      READY   STATUS    RESTARTS   AGE
+worker-dd46d7584-5s5gw    2/2     Running   1          6m
+
+Root cause: Observed the worker app logs-
+[root@ip-172-31-5-224 k8s-specifications]# kubectl logs worker-dd46d7584-5s5gw
+Connected to db
+Found redis at 10.101.11.127
+Connecting to redis 
+
+As per the logs, first it connects to db then connects to Redis. So, every time when the worker pod is deleted the new container again try to establish connection with db and redis.
+Inside the worker application, it has been written that container needs to restart on failure. So, whenever it fails to establish the connection with db, the container is restarted.
+When the container restarts, the application is restarted and then connect to new db as the old db is deleted also connect to redis and flow started working.
+Now new db is having all the data(voting info) but since the result app is trying to connect to old db which is deleted so it is not working.
+To make the Result pod starts working:
+To make the result pod works, we restarted the result pod by deleting it. The new result pod is created and established the socket connection with new db pod. Now the result app started working.
+[root@ip-172-31-5-224 k8s-specifications]# kubectl delete pod result-5d57b59f4b-cnc5w
+But the old voting information is not restored which means with the db deletion, voting data is also gone.
+So now all the pods are running fine, but the issue observed that the old voting info is gone
